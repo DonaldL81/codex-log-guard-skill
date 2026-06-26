@@ -12,10 +12,13 @@ $script:LogDir = Join-Path $script:RootDir "monitor-logs"
 $script:CodexDir = Join-Path $env:USERPROFILE ".codex"
 $script:LogDbPath = Join-Path $script:CodexDir "logs_2.sqlite"
 $script:BackupDir = Join-Path $script:CodexDir "logs_backup"
+$script:SettingsPath = Join-Path $script:RootDir "guard-settings.json"
 $script:CurrentCsvPath = ""
 $script:IsMonitoring = $false
 $script:BlockerInstalled = $false
+$script:AutoGuardEnabled = $true
 $script:CountingEnabled = $true
+$script:IsClearingLogs = $false
 $script:CountingActiveThisRun = $false
 $script:MonitorHadBlockerAtStart = $false
 $script:MonitorStartCounter = 0
@@ -94,6 +97,48 @@ if (-not $SelfTest) {
 $script:CoreModulePath = Join-Path $script:RootDir "lib\CodexLogGuardCore.psm1"
 Import-Module $script:CoreModulePath -Force -WarningAction SilentlyContinue
 Initialize-CodexLogGuardContext -RootDir $script:RootDir -LogDir $script:LogDir -CodexDir $script:CodexDir -LogDbPath $script:LogDbPath -BackupDir $script:BackupDir -MonitorWarnMBps $script:MonitorWarnMBps -MonitorActiveWindowSeconds $script:MonitorActiveWindowSeconds
+
+function Read-GuardSettings {
+    if (-not (Test-Path -LiteralPath $script:SettingsPath)) {
+        return
+    }
+
+    try {
+        $settings = Get-Content -Encoding UTF8 -Raw -LiteralPath $script:SettingsPath | ConvertFrom-Json
+        if ($null -ne $settings.auto_guard_enabled) {
+            $script:AutoGuardEnabled = [bool]$settings.auto_guard_enabled
+        }
+        if ($null -ne $settings.count_when_monitoring) {
+            $script:CountingEnabled = [bool]$settings.count_when_monitoring
+        }
+    } catch {
+        # Keep defaults if the settings file is missing or damaged.
+    }
+}
+
+function Save-GuardSettings {
+    $settings = [pscustomobject]@{
+        auto_guard_enabled = [bool]$script:AutoGuardEnabled
+        count_when_monitoring = [bool]$script:CountingEnabled
+    }
+    $json = $settings | ConvertTo-Json -Depth 3
+    [System.IO.File]::WriteAllText($script:SettingsPath, $json, (New-Object System.Text.UTF8Encoding($true)))
+}
+
+Read-GuardSettings
+
+function Read-LogCounterSafe {
+    if (-not (Test-Path -LiteralPath $script:LogDbPath)) {
+        return 0
+    }
+
+    try {
+        return Invoke-LogCounterAction "read"
+    } catch {
+        return 0
+    }
+}
+
 function Write-MonitorCsvRow([pscustomobject]$Sample) {
     if (-not $script:CurrentCsvPath) {
         return
@@ -110,7 +155,7 @@ function Write-MonitorCsvRow([pscustomobject]$Sample) {
 function New-MonitorSample {
     $stats = Get-CodexProcessWriteStats
     $thread = Get-RecentThreadContext
-    $currentCounter = Invoke-LogCounterAction "read"
+    $currentCounter = Read-LogCounterSafe
     if ($script:CountingActiveThisRun) {
         $sinceStart = $currentCounter - $script:MonitorStartCounter
         $sinceLast = $currentCounter - $script:MonitorPreviousCounter
@@ -154,7 +199,16 @@ function New-MonitorSample {
 }
 
 function Get-DisplayBlockerStatus($Status) {
-    if (-not $Status -or -not $Status.trigger_installed) {
+    if (-not $Status) {
+        return "拦截器：未安装"
+    }
+    if (-not $Status.db_exists) {
+        return "拦截器：日志文件不存在，等待 Codex 重建"
+    }
+    if ($null -eq $Status.logs_count) {
+        return "拦截器：日志表未生成，等待 Codex 初始化"
+    }
+    if (-not $Status.trigger_installed) {
         return "拦截器：未安装"
     }
     return "拦截器：拦截保护中"
@@ -171,12 +225,15 @@ function Update-CountingButtonText {
 }
 
 function Update-BlockerToggleButtonText {
-    if ($script:BlockerInstalled) {
+    $btnBlockerToggle.UseVisualStyleBackColor = $false
+    if ($script:AutoGuardEnabled) {
         $btnBlockerToggle.Text = "拦截保护中"
-        $btnBlockerToggle.ForeColor = $script:ColorSuccessText
+        $btnBlockerToggle.ForeColor = [System.Drawing.Color]::White
+        $btnBlockerToggle.BackColor = $script:ColorSuccessText
     } else {
         $btnBlockerToggle.Text = "拦截器未安装"
-        $btnBlockerToggle.ForeColor = $script:ColorDangerText
+        $btnBlockerToggle.ForeColor = [System.Drawing.Color]::White
+        $btnBlockerToggle.BackColor = $script:ColorDangerText
     }
 }
 
@@ -242,7 +299,13 @@ function Get-WriteEvaluation([object[]]$Samples) {
     if ($realWriteHigh) {
         $reason = "近 60 秒均值 $avg60 MB/s"
         if ($continuousHigh) { $reason = "连续 3 次 >= 0.5 MB/s" }
-        if (-not $script:BlockerInstalled) { $reason = "$reason；未安装拦截器，建议点击安装拦截器" }
+        if (-not $script:BlockerInstalled) {
+            if ($script:AutoGuardEnabled) {
+                $reason = "$reason；自动保护已开启，等待日志库可用后自动安装拦截器"
+            } else {
+                $reason = "$reason；未安装拦截器，建议开启拦截保护"
+            }
+        }
         return [pscustomobject]@{
             Level = "异常"
             Text = "写盘评估：异常偏高"
@@ -513,6 +576,8 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $restartTimer = New-Object System.Windows.Forms.Timer
 $restartTimer.Interval = 1000
+$statusTimer = New-Object System.Windows.Forms.Timer
+$statusTimer.Interval = 5000
 
 function Set-Message([string]$Text) {
     $lblMessage.Text = $Text
@@ -606,13 +671,53 @@ function Set-MonitoringUiState([bool]$Monitoring) {
     Update-BlockerToggleButtonText
 }
 
+function Try-EnsureAutoGuard($Status) {
+    if (-not $script:AutoGuardEnabled -or $script:IsClearingLogs -or -not $Status) {
+        return ""
+    }
+    if ($Status.trigger_installed -or -not $Status.db_exists -or $null -eq $Status.logs_count) {
+        return ""
+    }
+
+    if ($script:IsMonitoring -and $script:CountingEnabled) {
+        $currentCounter = Invoke-LogCounterAction "enable"
+        $script:MonitorStartCounter = $currentCounter
+        $script:MonitorPreviousCounter = $currentCounter
+        $script:CountingActiveThisRun = $true
+    } else {
+        Invoke-LogBlockerAction "install"
+        if ($script:IsMonitoring) {
+            $currentCounter = Invoke-LogCounterAction "read"
+            $script:MonitorStartCounter = $currentCounter
+            $script:MonitorPreviousCounter = $currentCounter
+            $script:CountingActiveThisRun = $false
+        }
+    }
+
+    if ($script:IsMonitoring) {
+        $script:MonitorHadBlockerAtStart = $true
+        $lblMonitorState.Text = "监测状态：正在监测"
+        $lblBlockedNow.Text = "本次采样拦截：0 次"
+        $lblBlockedTotal.Text = "本轮累计拦截：0 次"
+    }
+    return "已自动重新安装拦截器"
+}
+
 function Refresh-StatusUi {
+    param([switch]$Silent)
+
     try {
         $status = Get-LogGuardStatus
+        $autoGuardMessage = Try-EnsureAutoGuard $status
+        if ($autoGuardMessage) {
+            $status = Get-LogGuardStatus
+        }
         $script:BlockerInstalled = [bool]$status.trigger_installed
         $lblBlocker.Text = Get-DisplayBlockerStatus $status
         if ($status.trigger_installed) {
             $lblBlocker.ForeColor = $script:ColorSuccessText
+        } elseif (-not $status.db_exists -or $null -eq $status.logs_count) {
+            $lblBlocker.ForeColor = $script:ColorWarningText
         } else {
             $lblBlocker.ForeColor = $script:ColorDangerText
         }
@@ -625,11 +730,15 @@ function Refresh-StatusUi {
         Update-BlockerToggleButtonText
         if ($status.error) {
             Set-Message "状态读取异常：$($status.error)"
+        } elseif ($autoGuardMessage) {
+            Set-Message $autoGuardMessage
         } else {
             Set-Message "状态已刷新"
         }
     } catch {
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "刷新状态失败", "OK", "Error") | Out-Null
+        if (-not $Silent) {
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "刷新状态失败", "OK", "Error") | Out-Null
+        }
         Set-Message "刷新状态失败"
     }
 }
@@ -645,9 +754,12 @@ function Start-Monitoring {
         }
         $script:CurrentCsvPath = Join-Path $script:LogDir ("codex-write-" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".csv")
         $status = Get-LogGuardStatus
+        if (Try-EnsureAutoGuard $status) {
+            $status = Get-LogGuardStatus
+        }
         $script:MonitorHadBlockerAtStart = [bool]$status.trigger_installed
         if (-not $script:MonitorHadBlockerAtStart) {
-            $script:MonitorStartCounter = Invoke-LogCounterAction "read"
+            $script:MonitorStartCounter = Read-LogCounterSafe
             $script:CountingActiveThisRun = $false
         } elseif ($script:CountingEnabled) {
             $script:MonitorStartCounter = Invoke-LogCounterAction "enable"
@@ -665,9 +777,12 @@ function Start-Monitoring {
         if ($script:MonitorHadBlockerAtStart) {
             $lblMonitorState.Text = "监测状态：正在监测"
             Set-MonitorHint "提示：空闲状态只能说明当前无明显写盘；建议开启会话并运行任务后再观察。" $script:ColorWarningText
+        } elseif ($script:AutoGuardEnabled) {
+            $lblMonitorState.Text = "监测状态：正在监测（等待拦截器）"
+            Set-MonitorHint "提示：自动保护已开启，正在等待 Codex 生成日志库后自动安装拦截器。" $script:ColorWarningText
         } else {
             $lblMonitorState.Text = "监测状态：正在监测（未安装拦截器）"
-            Set-MonitorHint "提示：当前未安装拦截器，只监测真实写盘；建议点击[安装拦截器]。" $script:ColorWarningText
+            Set-MonitorHint "提示：当前未安装拦截器，只监测真实写盘；建议开启拦截保护。" $script:ColorWarningText
         }
         $lblCsv.Text = "本次监测日志：$script:CurrentCsvPath"
         Set-MonitoringUiState $true
@@ -717,7 +832,11 @@ function Apply-MonitorSample($sample) {
         $lblBlockedNow.Text = "本次采样拦截：$(Format-CountUnit $sample.BlockedLogInsertsSinceLastSample '次')"
         $lblBlockedTotal.Text = "本轮累计拦截：$(Format-CountUnit $sample.BlockedLogInsertsSinceStart '次')"
         if (-not $script:MonitorHadBlockerAtStart) {
-            Set-MonitorHint "提示：当前未安装拦截器，只监测真实写盘；建议点击[安装拦截器]。" $script:ColorWarningText
+            if ($script:AutoGuardEnabled) {
+                Set-MonitorHint "提示：自动保护已开启，正在等待 Codex 生成日志库后自动安装拦截器。" $script:ColorWarningText
+            } else {
+                Set-MonitorHint "提示：当前未安装拦截器，只监测真实写盘；建议开启拦截保护。" $script:ColorWarningText
+            }
         } elseif ($sample.TaskState -eq "最近有会话活动") {
             Set-MonitorHint "提示：已检测到近期会话活动，当前数据可用于观察任务运行时写盘。" $script:ColorSuccessText
         } else {
@@ -781,6 +900,11 @@ function Add-MonitorSample {
 
 $timer.Add_Tick({ Add-MonitorSample })
 $restartTimer.Add_Tick({ Check-RestartRequests })
+$statusTimer.Add_Tick({
+    if (-not $script:IsMonitoring -and $script:AutoGuardEnabled -and -not $script:BlockerInstalled) {
+        Refresh-StatusUi -Silent
+    }
+})
 
 $btnOpenCodexLogDir.Add_Click({
     if (-not (Test-Path -LiteralPath $script:CodexDir)) {
@@ -802,11 +926,14 @@ function Invoke-ClearLogFilesFromUi {
         return
     }
     try {
+        $script:IsClearingLogs = $true
         $message = Backup-And-ClearLogs
-        $message = "$message`r`n`r`n注意：清理文件会移动旧的 logs_2.sqlite*，原来安装在这个数据库里的拦截器也会一起失效。请重新打开 Codex，等新的 logs_2.sqlite 生成后，再安装一次拦截器。"
+        $message = "$message`r`n`r`n注意：清理文件会移动旧的 logs_2.sqlite*，原来安装在这个数据库里的拦截器也会一起失效。请重新打开 Codex，工具检测到新的 logs_2.sqlite 和 logs 表后会自动重新安装拦截器。"
         [System.Windows.Forms.MessageBox]::Show($message, "清理完成", "OK", "Information") | Out-Null
+        $script:IsClearingLogs = $false
         Refresh-StatusUi
     } catch {
+        $script:IsClearingLogs = $false
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "清理失败", "OK", "Error") | Out-Null
     }
 }
@@ -828,75 +955,44 @@ function Invoke-ClearBackupHistoryFromUi {
 $btnClearCurrent.Add_Click({ Invoke-ClearLogFilesFromUi })
 $btnClear.Add_Click({ Invoke-ClearBackupHistoryFromUi })
 $btnBlockerToggle.Add_Click({
-    $status = Get-LogGuardStatus
-    if ($status.trigger_installed) {
-        $confirmText = if ($script:IsMonitoring) {
-            "卸载后本轮监测将不再拦截和计数，只继续监测真实写盘。确定卸载拦截器吗？"
-        } else {
-            "卸载后 Codex 将重新写入 logs 表。确定卸载拦截器吗？"
-        }
-        $confirm = [System.Windows.Forms.MessageBox]::Show($confirmText, "卸载拦截器", "YesNo", "Warning")
+    if ($script:AutoGuardEnabled) {
+        $confirm = [System.Windows.Forms.MessageBox]::Show("关闭后将不再自动安装拦截器，并会尝试卸载当前日志库中的拦截器。确定关闭拦截保护吗？", "关闭拦截保护", "YesNo", "Warning")
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) {
             return
         }
         try {
-            Invoke-LogBlockerAction "remove"
-            $script:BlockerInstalled = $false
-            if ($script:IsMonitoring) {
-                $currentCounter = Invoke-LogCounterAction "read"
-                $script:MonitorStartCounter = $currentCounter
-                $script:MonitorPreviousCounter = $currentCounter
-                $script:CountingActiveThisRun = $false
-                $script:MonitorHadBlockerAtStart = $false
-                $lblMonitorState.Text = "监测状态：正在监测（未安装拦截器）"
-                $lblBlockedNow.Text = "本次采样拦截：0 次"
-                $lblBlockedTotal.Text = "本轮累计拦截：0 次"
-                Set-MonitorHint "提示：当前未安装拦截器，只监测真实写盘；建议点击[安装拦截器]。" $script:ColorWarningText
+            $script:AutoGuardEnabled = $false
+            Save-GuardSettings
+            $status = Get-LogGuardStatus
+            if ($status.trigger_installed) {
+                Invoke-LogBlockerAction "remove"
+                $script:BlockerInstalled = $false
             }
             Refresh-StatusUi
-            [System.Windows.Forms.MessageBox]::Show("已卸载拦截器。", "完成", "OK", "Information") | Out-Null
+            [System.Windows.Forms.MessageBox]::Show("已关闭拦截保护。", "完成", "OK", "Information") | Out-Null
         } catch {
-            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "卸载失败", "OK", "Error") | Out-Null
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "关闭失败", "OK", "Error") | Out-Null
         }
     } else {
         try {
-            if ($script:IsMonitoring -and $script:CountingEnabled) {
-                $currentCounter = Invoke-LogCounterAction "enable"
-                $script:MonitorStartCounter = $currentCounter
-                $script:MonitorPreviousCounter = $currentCounter
-                $script:CountingActiveThisRun = $true
-            } else {
+            $script:AutoGuardEnabled = $true
+            Save-GuardSettings
+            $status = Get-LogGuardStatus
+            $message = "已开启拦截保护。"
+            if ($status.db_exists -and $null -ne $status.logs_count -and -not $status.trigger_installed) {
                 Invoke-LogBlockerAction "install"
-                if ($script:IsMonitoring) {
-                    $currentCounter = Invoke-LogCounterAction "read"
-                    $script:MonitorStartCounter = $currentCounter
-                    $script:MonitorPreviousCounter = $currentCounter
-                    $script:CountingActiveThisRun = $false
-                } else {
-                    $script:CountingEnabled = $true
-                }
-            }
-            $script:BlockerInstalled = $true
-            if ($script:IsMonitoring) {
-                $script:MonitorHadBlockerAtStart = $true
-                $lblMonitorState.Text = "监测状态：正在监测"
-                $lblBlockedNow.Text = "本次采样拦截：0 次"
-                $lblBlockedTotal.Text = "本轮累计拦截：0 次"
-                if ($script:CountingActiveThisRun) {
-                    Set-MonitorHint "提示：已在监测中安装拦截器，本轮拦截计数从安装时重新开始。" $script:ColorSuccessText
-                } else {
-                    Set-MonitorHint "提示：已在监测中安装拦截器；计数已关闭，本轮只监测写盘。" $script:ColorWarningText
-                }
+                $message = "已开启拦截保护，并已安装拦截器。"
+            } elseif (-not $status.db_exists) {
+                $message = "已开启拦截保护。当前日志文件不存在，重新打开 Codex 后会自动安装。"
+            } elseif ($null -eq $status.logs_count) {
+                $message = "已开启拦截保护。当前 logs 表还未生成，Codex 初始化后会自动安装。"
+            } elseif ($status.trigger_installed) {
+                $message = "已开启拦截保护，当前拦截器已经安装。"
             }
             Refresh-StatusUi
-            $message = if ($script:CountingEnabled) {
-                "已安装拦截器，拦截次数已开启统计。"
-            } else {
-                "已安装拦截器，当前计数为关闭状态。"
-            }
             [System.Windows.Forms.MessageBox]::Show($message, "完成", "OK", "Information") | Out-Null
         } catch {
-            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "安装失败", "OK", "Error") | Out-Null
+            [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "开启失败", "OK", "Error") | Out-Null
         }
     }
 })
@@ -905,11 +1001,15 @@ $btnRestore.Add_Click({
         $status = Get-LogGuardStatus
         $script:BlockerInstalled = [bool]$status.trigger_installed
         if ($script:CountingEnabled) {
-            Invoke-LogCounterAction "reset" | Out-Null
+            if (Test-Path -LiteralPath $script:LogDbPath) {
+                Invoke-LogCounterAction "reset" | Out-Null
+            }
             $script:CountingEnabled = $false
+            Save-GuardSettings
             $message = "已关闭拦截次数统计，并已清空历史累计拦截次数。开始监测时也不会计数，少量偏高已拦截/异常偏高已拦截相关结论可能不准确。"
         } else {
             $script:CountingEnabled = $true
+            Save-GuardSettings
             $message = if ($script:BlockerInstalled) {
                 "已开启拦截次数统计。开始监测时会临时计数。"
             } else {
@@ -959,6 +1059,7 @@ $form.Add_FormClosing({
 
 $form.Add_FormClosed({
     $restartTimer.Stop()
+    $statusTimer.Stop()
     $timer.Stop()
     $foregroundTimer.Stop()
     if ($script:InstanceMutex) {
@@ -975,4 +1076,5 @@ Refresh-StatusUi
 Set-MonitoringUiState $false
 Update-EvaluationUi (Get-WriteEvaluation @())
 $restartTimer.Start()
+$statusTimer.Start()
 [void][System.Windows.Forms.Application]::Run($form)

@@ -32,7 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 - 用户说“检查写盘”“看看是否异常”“帮我诊断”时，调用 `status -Json` 并总结结果。
 - 用户说“安装拦截器”“开启保护”时，调用 `install`，并说明拦截保护安装后会持续生效，关闭 GUI 后仍会拦截。
 - 用户说“清理日志”“清理文件”时，先提醒用户完全退出 Codex，再调用 `clean`。
-- 清理完成后必须提醒：清理会移动旧的 `logs_2.sqlite*`，旧数据库里的拦截器也会一起被移走；需要重新打开 Codex 生成新的 `logs_2.sqlite`，然后再安装一次拦截器。
+- 清理完成后必须提醒：清理会移动旧的 `logs_2.sqlite*`，旧数据库里的拦截器也会一起被移走；如果 GUI 保持打开且拦截保护开启，重新打开 Codex 后会自动重新安装拦截器；如果只用命令行清理，则需要重新运行 `install`。
 
 ## 安装完成后给用户的提示
 

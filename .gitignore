@@ -4,6 +4,7 @@
 *.bak
 monitor-logs/
 logs_backup_*/
+guard-settings.json
 
 # Local SQLite data copied during debugging
 *.sqlite

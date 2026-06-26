@@ -2,7 +2,7 @@
 
 一个 Windows 小工具，也可以作为 Codex Skill 使用，用来检查和临时缓解 Codex 本地 `logs_2.sqlite` 异常写盘问题。
 
-![界面预览](screenshot.png)
+![界面预览](assets/screenshot.png)
 
 ## 使用方式
 

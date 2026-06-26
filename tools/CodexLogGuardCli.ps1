@@ -24,7 +24,7 @@ function ConvertTo-LogGuardSummary {
     $status = Get-LogGuardStatus
     $writeStats = Get-CodexProcessWriteStats
     $thread = Get-RecentThreadContext
-    $logWriteMB = [math]::Round(($status.DbMB + $status.WalMB + $status.ShmMB), 3)
+    $logSizeMB = [math]::Round(($status.DbMB + $status.WalMB + $status.ShmMB), 3)
     $blockerText = if ($status.trigger_installed) { "protected" } else { "not_installed" }
     $risk = if ($writeStats.TotalWriteMBps -ge 0.5) {
         if ($status.trigger_installed) { "write_high_but_guarded" } else { "write_high_install_guard_recommended" }
@@ -38,7 +38,7 @@ function ConvertTo-LogGuardSummary {
         trigger_installed = [bool]$status.trigger_installed
         blocker_mode = $status.blocker_mode
         log_file = $script:LogDbPath
-        log_write_mb = $logWriteMB
+        log_size_mb = $logSizeMB
         logs_count = $status.logs_count
         backup_dir = $script:BackupDir
         backup_dir_mb = $status.BackupDirMB
@@ -76,12 +76,15 @@ function Write-Result($Value) {
         Write-Output "top_process=$($Value.top_write_mbps) MB/s | $($Value.top_process)#$($Value.top_pid)"
         Write-Output "counting_active=$($Value.counting_active) blocker_at_start=$($Value.blocker_at_start)"
         Write-Output "csv_file=$($Value.csv_file)"
+        if ($Value.PSObject.Properties["final_status"] -and $null -ne $Value.final_status) {
+            Write-FinalStatusSummary $Value.final_status
+        }
         return
     }
 
     Write-Output "result=$($Value.result)"
     Write-Output "blocker=$($Value.blocker) mode=$($Value.blocker_mode)"
-    Write-Output "log_write_mb=$($Value.log_write_mb) logs_count=$($Value.logs_count)"
+    Write-Output "log_size_mb=$($Value.log_size_mb) logs_count=$($Value.logs_count)"
     Write-Output "counter_total=$($Value.counter_total) last_session_delta=$($Value.last_session_delta)"
     Write-Output "total_write_mbps=$($Value.total_write_mbps)"
     Write-Output "top_process=$($Value.top_write_mbps) MB/s | $($Value.top_process)#$($Value.top_pid)"
@@ -90,6 +93,17 @@ function Write-Result($Value) {
         Write-Output "thread_title=$($Value.thread_title)"
     }
     Write-Output "log_file=$($Value.log_file)"
+}
+
+function Write-FinalStatusSummary($Status) {
+    Write-Output "final_status.result=$($Status.result)"
+    Write-Output "final_status.blocker=$($Status.blocker) mode=$($Status.blocker_mode)"
+    Write-Output "final_status.log_size_mb=$($Status.log_size_mb) logs_count=$($Status.logs_count)"
+    Write-Output "final_status.backup_dir_mb=$($Status.backup_dir_mb)"
+    Write-Output "final_status.counter_total=$($Status.counter_total) last_session_delta=$($Status.last_session_delta)"
+    Write-Output "final_status.total_write_mbps=$($Status.total_write_mbps)"
+    Write-Output "final_status.process_status=$($Status.process_status)"
+    Write-Output "final_status.log_file=$($Status.log_file)"
 }
 
 function Start-DeferredCleanHelper {
@@ -223,7 +237,7 @@ function Start-FixedMonitor {
             $samples += $sample
             Write-MonitorCsvRow $csvPath $sample
             if (-not $Json) {
-                Write-Output ("sample={0}/{1} write_mbps={2} blocked_since_last={3}" -f ($i + 1), $sampleCount, $sample.TotalWriteMBps, $sample.BlockedLogInsertsSinceLastSample)
+                Write-Host ("sample={0}/{1} write_mbps={2} blocked_since_last={3}" -f ($i + 1), $sampleCount, $sample.TotalWriteMBps, $sample.BlockedLogInsertsSinceLastSample)
             }
             if ($i -lt ($sampleCount - 1)) {
                 Start-Sleep -Seconds $IntervalSeconds
@@ -242,6 +256,7 @@ function Start-FixedMonitor {
     $maxWrite = if ($samples.Count -gt 0) { [math]::Round((($samples | Measure-Object TotalWriteMBps -Maximum).Maximum), 3) } else { 0 }
     $blockedTotal = if ($samples.Count -gt 0) { [int](($samples | Measure-Object BlockedLogInsertsSinceLastSample -Sum).Sum) } else { 0 }
     $topSample = $samples | Sort-Object TopWriteMBps -Descending | Select-Object -First 1
+    $finalStatus = ConvertTo-LogGuardSummary
 
     return [pscustomobject]@{
         result = Get-CliMonitorEvaluation $samples $hadBlocker
@@ -257,6 +272,7 @@ function Start-FixedMonitor {
         top_process = if ($topSample) { $topSample.TopProcess } else { "" }
         top_pid = if ($topSample) { $topSample.TopPID } else { "" }
         top_write_mbps = if ($topSample) { $topSample.TopWriteMBps } else { 0 }
+        final_status = $finalStatus
         samples = $samples
     }
 }

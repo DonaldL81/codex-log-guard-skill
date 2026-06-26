@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("status", "sample", "monitor", "install", "uninstall", "clean", "deferred-clean", "clear-backup", "enable-counter", "disable-counter", "open-gui", "self-test")]
+    [ValidateSet("status", "sample", "monitor", "install", "uninstall", "deferred-clean", "clear-backup", "enable-counter", "disable-counter", "open-gui", "self-test")]
     [string]$Command = "status",
     [int]$DurationSeconds = 120,
     [int]$IntervalSeconds = 5,
@@ -279,10 +279,6 @@ try {
         "uninstall" {
             Invoke-LogBlockerAction "remove"
             Write-Result "guard_uninstalled"
-        }
-        "clean" {
-            $message = Backup-And-ClearLogs
-            Write-Result "$message clean_moves_logs_2_sqlite_reopen_codex_then_reinstall_guard"
         }
         "deferred-clean" {
             Start-DeferredCleanHelper

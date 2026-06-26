@@ -2,14 +2,18 @@
 *.log
 *.tmp
 *.bak
+*.csv
 monitor-logs/
+logs_backup/
 logs_backup_*/
 guard-settings.json
+_archive/
 
 # Local SQLite data copied during debugging
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite-journal
 
 # PowerShell and Windows transient files
 *.ps1xml

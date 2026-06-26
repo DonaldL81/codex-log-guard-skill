@@ -1,6 +1,6 @@
 ---
 name: codex-log-guard-skill
-description: 检查和缓解 Windows 上 Codex 本地 logs_2.sqlite 异常写盘问题。Use when the user asks to inspect Codex write activity, open the Codex write monitor panel, install or remove the log guard, clean Codex logs, or troubleshoot Codex logs_2.sqlite disk usage.
+description: 检查和缓解 Windows 上 Codex 本地 logs_2.sqlite 异常写盘问题。Use when the user asks to inspect Codex write activity, open the Codex write monitor panel, install or remove the log guard, defer Codex log cleanup, or troubleshoot Codex logs_2.sqlite disk usage.
 ---
 
 # Codex 写盘异常检测
@@ -11,13 +11,12 @@ description: 检查和缓解 Windows 上 Codex 本地 logs_2.sqlite 异常写盘
 
 把包含这个 `SKILL.md` 的目录当作项目根目录。
 
-- 打开 GUI 面板：运行 `tools/CodexLogGuardCli.ps1 open-gui`。
-- 不打开 GUI，直接检查状态：运行 `tools/CodexLogGuardCli.ps1 status -Json`。
 - 固定时长实时监测：运行 `tools/CodexLogGuardCli.ps1 monitor -DurationSeconds 120 -Json`。
+- 清理日志文件或关闭 Codex 后自动清理日志：运行 `tools/CodexLogGuardCli.ps1 deferred-clean`。
 - 安装日志拦截保护：运行 `tools/CodexLogGuardCli.ps1 install`。
 - 卸载日志拦截保护：运行 `tools/CodexLogGuardCli.ps1 uninstall`。
-- Codex 对话中清理日志：运行 `tools/CodexLogGuardCli.ps1 deferred-clean`。
-- 手动命令行清理当前 Codex 日志文件：确认 Codex 已完全退出后，运行 `tools/CodexLogGuardCli.ps1 clean`；Codex 对话中不要默认使用这个命令。
+- 不打开 GUI，直接检查状态：运行 `tools/CodexLogGuardCli.ps1 status -Json`。
+- 打开 GUI 面板：运行 `tools/CodexLogGuardCli.ps1 open-gui`。
 - 只清空备份历史：运行 `tools/CodexLogGuardCli.ps1 clear-backup`。
 - 自检：运行 `tools/CodexLogGuardCli.ps1 self-test`。
 
@@ -29,29 +28,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 
 ## 调度规则
 
-- 完成项目安装、初始化、运行自检或首次打开后，必须告诉用户支持的所有自然语言命令：检查写盘、打开监控面板、安装拦截器、卸载拦截器、清理日志文件、清空备份历史、自检。
-- 用户说“打开监控面板”“打开 GUI”“我想看实时数据”时，打开 GUI。
-- 用户说“检查写盘”“看看是否异常”“帮我诊断”时，调用 `status -Json` 并总结结果。
-- 用户说“实时监测”“监测 2 分钟”“运行监测报告”时，调用 `monitor -DurationSeconds 120 -Json`；监测命令会持续到固定时长结束，结束后总结均值、峰值、拦截次数和 CSV 路径。
-- 用户说“安装拦截器”“开启保护”时，调用 `install`，并说明拦截保护安装后会持续生效，关闭 GUI 后仍会拦截。
-- 用户在 Codex 对话中说“清理日志”“清理文件”时，默认调用 `deferred-clean`；不要要求 Codex 已退出后再执行 `clean`，因为 Codex 退出后当前 Skill 无法继续执行。
-- 只有用户明确表示自己在手动 PowerShell 或 GUI 场景中操作，并且 Codex 已完全退出时，才使用 `clean`。
-- 清理完成后必须提醒：清理会移动旧的 `logs_2.sqlite*`，旧数据库里的拦截器也会一起被移走；如果 GUI 保持打开且拦截保护开启，重新打开 Codex 后会自动重新安装拦截器；如果只用命令行清理，则需要重新运行 `install`。
-- 延迟清理助手完成后会自动等待新日志库生成并重新安装拦截器；不要再额外启动 GUI 等待。
+- 诊断监测：用户说“检查 Codex 有没有问题”“检查写盘”“看看是否异常”“Codex 最近有点卡”“帮我诊断”“监测 2 分钟”时，运行 `monitor -DurationSeconds 120 -Json`。
+- 延迟清理：用户说“清理日志”“清理文件”“关闭 Codex 后自动清理日志”时，运行 `deferred-clean`。
+- 拦截保护：用户说“安装拦截器”“开启保护”时运行 `install`；说“卸载拦截器”“关闭保护”时运行 `uninstall`。
+- 状态检查：用户说“查看当前保护状态”“快速看状态”“看一下拦截器状态”时，运行 `status -Json`。
+- 打开面板：用户说“打开监控面板”“打开 GUI”“我想看实时数据”时，运行 `open-gui`。
+- 维护检查：用户说“清空备份历史”时运行 `clear-backup`；说“运行自检”“检查工具是否正常”时运行 `self-test`。
+
+## 执行要求
+
+- 诊断监测前，先告诉用户会监测约 2 分钟，期间可以正常使用 Codex 或运行一个任务；结束后总结是否异常、平均写盘、峰值写盘、拦截次数和 CSV 路径。
+- 状态检查后，总结拦截器状态、日志文件大小、日志行数和备份目录大小。
+- 安装保护后，说明拦截保护会持续生效，关闭 GUI 后仍会拦截。
+- 延迟清理启动后，提醒用户按助手窗口提示完全退出 Codex，清理后重新打开 Codex；说明旧 `logs_2.sqlite*` 会被移走，助手会等待新日志库生成并自动重新安装拦截器。
 
 ## 安装完成后给用户的提示
 
 安装或首次启动完成后，用简短中文告诉用户：
 
 ```text
-已准备好 Codex 写盘异常检测工具。你可以直接对我说：
+已准备好 Codex 写盘异常检测工具。你可以按需要直接对我说：
+
+要确认 Codex 有没有问题时，可以说：
+- 帮我检查 Codex 有没有问题
 - 帮我检查 Codex 写盘
+- Codex 最近有点卡，帮我检查一下
 - 监测 2 分钟并生成报告
-- 打开监控面板
-- 安装拦截器
-- 卸载拦截器
+
+要清理日志时，可以说：
 - 清理日志文件
 - 关闭 Codex 后自动清理日志
+
+要开启或关闭拦截保护时，可以说：
+- 安装拦截器
+- 卸载拦截器
+
+要快速查看当前状态时，可以说：
+- 查看当前保护状态
+
+要打开图形界面时，可以说：
+- 打开监控面板
+
+要维护备份或检查工具时，可以说：
 - 清空备份历史
 - 运行自检
 ```
@@ -59,6 +77,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 ## 安全边界
 
 - 不要强制关闭 Codex，除非用户明确要求。
-- 不要整体删除 `C:\Users\<user>\.codex`。
+- 只能移动、删除或清空 Codex 日志相关文件：
+  - `C:\Users\<user>\.codex\logs_2.sqlite`
+  - `C:\Users\<user>\.codex\logs_2.sqlite-wal`
+  - `C:\Users\<user>\.codex\logs_2.sqlite-shm`
+  - `C:\Users\<user>\.codex\logs_backup\*`
+  - 本工具项目目录下的 `monitor-logs\*`
+- 只能为了安装、卸载或计数拦截器修改 `logs_2.sqlite` 内的日志拦截触发器；不要修改其他表、其他数据库或其他 Codex 配置。
+- 不要整体删除 `C:\Users\<user>\.codex`，不要删除、移动或修改 `.codex` 下除上述日志文件以外的任何文件。
+- 不要删除、移动或修改用户项目文件、配置文件、源码、密钥文件、聊天记录文件或其他非日志文件。
+- 如果日志文件被占用、清理失败或等待 Codex 重建日志库超时，只能提示用户退出 Codex 后重试或打开 GUI 处理；不要扩大删除范围，不要改删其他目录，不要强制结束进程。
 - 不要读取或输出用户消息正文、Codex 回复正文、API Key、Token 或无关状态。
 - `monitor-logs` 和 `logs_backup` 是本地运行产物，不要作为发布文件提交。

@@ -21,16 +21,30 @@ codex写盘异常检测.vbs
 
 ## Codex Skill 调用
 
-安装或首次运行后，可以直接对 Codex 说：
+安装或首次运行后，可以直接按下面的说法让 Codex 操作：
 
 ```text
+想确认 Codex 有没有问题时，可以说：
+帮我检查 Codex 有没有问题
 帮我检查 Codex 写盘
+Codex 最近有点卡，帮我检查一下
 监测 2 分钟并生成报告
-打开监控面板
-安装拦截器
-卸载拦截器
+
+想清理日志时，可以说：
 清理日志文件
 关闭 Codex 后自动清理日志
+
+想开启或关闭拦截保护时，可以说：
+安装拦截器
+卸载拦截器
+
+想快速查看当前状态时，可以说：
+查看当前保护状态
+
+想打开图形界面时，可以说：
+打开监控面板
+
+想维护备份或检查工具时，可以说：
 清空备份历史
 运行自检
 ```
@@ -49,14 +63,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 .\tools\CodexLogGuardCli.ps1 open-gui
 .\tools\CodexLogGuardCli.ps1 install
 .\tools\CodexLogGuardCli.ps1 uninstall
-.\tools\CodexLogGuardCli.ps1 clean
 .\tools\CodexLogGuardCli.ps1 deferred-clean
+.\tools\CodexLogGuardCli.ps1 clear-backup
 .\tools\CodexLogGuardCli.ps1 self-test
 ```
 
-在 Codex 对话里发起清理时，默认应使用 `deferred-clean`。它会打开一个独立 PowerShell 窗口，提示你完全退出 Codex；检测到 Codex 退出后自动清理日志文件，然后等待你重新打开 Codex，等新的 `logs_2.sqlite` 和 `logs` 表生成后自动安装拦截器。
+在 Codex 对话里说“帮我检查 Codex 有没有问题”“帮我检查 Codex 写盘”“Codex 最近有点卡，帮我检查一下”时，默认会监测 2 分钟后给出结论；只说“查看当前保护状态”时，才会快速查看当前状态。
 
-`clean` 适合你已经手动退出 Codex 后，在 PowerShell 里手动运行；它不是 Codex 对话里的默认清理方式。
+“清理日志文件”和“关闭 Codex 后自动清理日志”是同一个流程，都会启动延迟清理助手。它会打开一个独立 PowerShell 窗口，提示你完全退出 Codex；检测到 Codex 退出后自动清理日志文件，然后等待你重新打开 Codex，等新的 `logs_2.sqlite` 和 `logs` 表生成后自动安装拦截器。
 
 `monitor` 是固定时长监测命令，默认建议 120 秒，每 5 秒采样一次。命令结束后会输出平均写盘、峰值写盘、本轮拦截次数和 CSV 记录文件路径；如果开始时拦截器已安装，监测期间会临时启用计数，结束后恢复纯拦截器。
 
@@ -86,7 +100,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 
 `文件管理` 可以打开 Codex 日志目录、清理当前日志文件、清空历史备份。清理当前日志前请先完全退出 Codex。
 
-注意：`清理文件` 会把当前 `logs_2.sqlite*` 移动到备份目录，原来安装在这个数据库里的拦截器也会一起被移走。如果 GUI 窗口保持打开且拦截保护处于开启状态，重新打开 Codex 后工具会自动检测新的 `logs_2.sqlite` 和 `logs` 表，并自动重新安装拦截器；如果只用命令行清理，则需要重新运行安装命令。
+注意：`清理文件` 会把当前 `logs_2.sqlite*` 移动到备份目录，原来安装在这个数据库里的拦截器也会一起被移走。如果 GUI 窗口保持打开且拦截保护处于开启状态，重新打开 Codex 后工具会自动检测新的 `logs_2.sqlite` 和 `logs` 表，并自动重新安装拦截器；如果通过 Codex Skill 清理，延迟清理助手也会等待新日志库生成并自动重新安装拦截器。
 
 `实时监测` 和 `监测明细` 用来观察任务运行时的真实写盘速度和拦截次数。
 

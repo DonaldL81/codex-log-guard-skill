@@ -96,7 +96,8 @@ try {
             Write-Result "guard_uninstalled"
         }
         "clean" {
-            Write-Result (Backup-And-ClearLogs)
+            $message = Backup-And-ClearLogs
+            Write-Result "$message clean_moves_logs_2_sqlite_reopen_codex_then_reinstall_guard"
         }
         "clear-backup" {
             Write-Result (Clear-BackupHistory)

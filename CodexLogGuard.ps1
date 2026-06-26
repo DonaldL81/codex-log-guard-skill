@@ -803,6 +803,7 @@ function Invoke-ClearLogFilesFromUi {
     }
     try {
         $message = Backup-And-ClearLogs
+        $message = "$message`r`n`r`n注意：清理文件会移动旧的 logs_2.sqlite*，原来安装在这个数据库里的拦截器也会一起失效。请重新打开 Codex，等新的 logs_2.sqlite 生成后，再安装一次拦截器。"
         [System.Windows.Forms.MessageBox]::Show($message, "清理完成", "OK", "Information") | Out-Null
         Refresh-StatusUi
     } catch {

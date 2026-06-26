@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("status", "sample", "install", "uninstall", "clean", "clear-backup", "enable-counter", "disable-counter", "open-gui", "self-test")]
+    [ValidateSet("status", "sample", "install", "uninstall", "clean", "deferred-clean", "clear-backup", "enable-counter", "disable-counter", "open-gui", "self-test")]
     [string]$Command = "status",
     [switch]$Json
 )
@@ -79,6 +79,21 @@ function Write-Result($Value) {
     Write-Output "log_file=$($Value.log_file)"
 }
 
+function Start-DeferredCleanHelper {
+    $helper = Join-Path $script:RootDir "tools\CodexLogGuardDeferredClean.ps1"
+    if (-not (Test-Path -LiteralPath $helper)) {
+        throw "Deferred clean helper missing: $helper"
+    }
+
+    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $powershell)) {
+        $powershell = "powershell.exe"
+    }
+
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$helper`""
+    Start-Process -FilePath $powershell -ArgumentList $arguments
+}
+
 try {
     switch ($Command) {
         "status" {
@@ -98,6 +113,10 @@ try {
         "clean" {
             $message = Backup-And-ClearLogs
             Write-Result "$message clean_moves_logs_2_sqlite_reopen_codex_then_reinstall_guard"
+        }
+        "deferred-clean" {
+            Start-DeferredCleanHelper
+            Write-Result "deferred_clean_started_close_codex_then_reopen_codex_when_prompted"
         }
         "clear-backup" {
             Write-Result (Clear-BackupHistory)

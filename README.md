@@ -59,6 +59,7 @@ codex写盘异常检测.vbs
 安装拦截器
 卸载拦截器
 清理日志文件
+关闭 Codex 后自动清理日志
 清空备份历史
 运行自检
 ```
@@ -77,8 +78,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 .\tools\CodexLogGuardCli.ps1 install
 .\tools\CodexLogGuardCli.ps1 uninstall
 .\tools\CodexLogGuardCli.ps1 clean
+.\tools\CodexLogGuardCli.ps1 deferred-clean
 .\tools\CodexLogGuardCli.ps1 self-test
 ```
+
+`deferred-clean` 适合 Codex 正在运行时使用。它会打开一个独立 PowerShell 窗口，提示你完全退出 Codex；检测到 Codex 退出后自动清理日志文件，然后等待你重新打开 Codex，等新的 `logs_2.sqlite` 和 `logs` 表生成后自动安装拦截器。
 
 ## 重要说明
 

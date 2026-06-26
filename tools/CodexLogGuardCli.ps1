@@ -1,6 +1,8 @@
 ﻿param(
-    [ValidateSet("status", "sample", "install", "uninstall", "clean", "deferred-clean", "clear-backup", "enable-counter", "disable-counter", "open-gui", "self-test")]
+    [ValidateSet("status", "sample", "monitor", "install", "uninstall", "clean", "deferred-clean", "clear-backup", "enable-counter", "disable-counter", "open-gui", "self-test")]
     [string]$Command = "status",
+    [int]$DurationSeconds = 120,
+    [int]$IntervalSeconds = 5,
     [switch]$Json
 )
 
@@ -66,6 +68,17 @@ function Write-Result($Value) {
         return
     }
 
+    if ($Value.PSObject.Properties["csv_file"]) {
+        Write-Output "result=$($Value.result)"
+        Write-Output "duration_seconds=$($Value.duration_seconds) interval_seconds=$($Value.interval_seconds) sample_count=$($Value.sample_count)"
+        Write-Output "avg_write_mbps=$($Value.avg_write_mbps) max_write_mbps=$($Value.max_write_mbps)"
+        Write-Output "blocked_total=$($Value.blocked_total)"
+        Write-Output "top_process=$($Value.top_write_mbps) MB/s | $($Value.top_process)#$($Value.top_pid)"
+        Write-Output "counting_active=$($Value.counting_active) blocker_at_start=$($Value.blocker_at_start)"
+        Write-Output "csv_file=$($Value.csv_file)"
+        return
+    }
+
     Write-Output "result=$($Value.result)"
     Write-Output "blocker=$($Value.blocker) mode=$($Value.blocker_mode)"
     Write-Output "log_write_mb=$($Value.log_write_mb) logs_count=$($Value.logs_count)"
@@ -94,6 +107,160 @@ function Start-DeferredCleanHelper {
     Start-Process -FilePath $powershell -ArgumentList $arguments
 }
 
+function Write-MonitorCsvRow([string]$Path, [pscustomobject]$Sample) {
+    $exists = Test-Path -LiteralPath $Path
+    if ($exists) {
+        $Sample | Export-Csv -LiteralPath $Path -NoTypeInformation -Append -Encoding UTF8
+    } else {
+        $Sample | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+    }
+}
+
+function New-CliMonitorSample([int]$StartCounter, [ref]$PreviousCounter, [bool]$CountingActive) {
+    $stats = Get-CodexProcessWriteStats
+    $thread = Get-RecentThreadContext
+    $currentCounter = 0
+    if (Test-Path -LiteralPath $script:LogDbPath) {
+        try {
+            $currentCounter = Invoke-LogCounterAction "read"
+        } catch {
+            $currentCounter = 0
+        }
+    }
+
+    if ($CountingActive) {
+        $sinceStart = $currentCounter - $StartCounter
+        $sinceLast = $currentCounter - [int]$PreviousCounter.Value
+        $PreviousCounter.Value = $currentCounter
+        $countMode = "monitor_counting"
+    } else {
+        $sinceStart = 0
+        $sinceLast = 0
+        $countMode = "not_counting"
+    }
+
+    $sampleStatus = $stats.Status
+    if ($sinceLast -gt 0) {
+        $sampleStatus = "guarded"
+    }
+
+    return [pscustomobject]@{
+        Time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        TotalWriteMBps = $stats.TotalWriteMBps
+        TopProcess = $stats.TopProcess
+        TopPID = $stats.TopPID
+        TopWriteMBps = $stats.TopWriteMBps
+        ProcessCount = $stats.ProcessCount
+        Status = $sampleStatus
+        TaskState = $thread.TaskState
+        ActiveThreadTitle = $thread.ThreadTitle
+        ActiveThreadCwd = $thread.ThreadCwd
+        BlockedLogCountMode = $countMode
+        BlockedLogInsertsTotal = $currentCounter
+        BlockedLogInsertsSinceStart = $sinceStart
+        BlockedLogInsertsSinceLastSample = $sinceLast
+    }
+}
+
+function Get-CliMonitorEvaluation([object[]]$Samples, [bool]$HadBlockerAtStart) {
+    if (-not $Samples -or $Samples.Count -eq 0) {
+        return "no_samples"
+    }
+
+    $avg = [math]::Round((($Samples | Measure-Object TotalWriteMBps -Average).Average), 3)
+    $max = [math]::Round((($Samples | Measure-Object TotalWriteMBps -Maximum).Maximum), 3)
+    $blocked = ($Samples | Measure-Object BlockedLogInsertsSinceLastSample -Sum).Sum
+    if ($blocked -gt 0) {
+        if ($blocked -ge 1000 -or $avg -ge 0.5 -or $max -ge 0.5) {
+            return "write_high_guarded"
+        }
+        return "write_slight_high_guarded"
+    }
+    if ($avg -ge 0.5 -or $max -ge 0.5) {
+        if ($HadBlockerAtStart) {
+            return "write_high_no_recent_blocks"
+        }
+        return "write_high_guard_recommended"
+    }
+    if ($avg -lt 0.05 -and $max -lt 0.5) {
+        return "write_normal"
+    }
+    return "write_slight_high"
+}
+
+function Start-FixedMonitor {
+    if ($DurationSeconds -lt 5) {
+        throw "DurationSeconds must be >= 5"
+    }
+    if ($IntervalSeconds -lt 1) {
+        throw "IntervalSeconds must be >= 1"
+    }
+
+    if (-not (Test-Path -LiteralPath $script:LogDir)) {
+        New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
+    }
+
+    $csvPath = Join-Path $script:LogDir ("codex-write-cli-" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".csv")
+    $status = Get-LogGuardStatus
+    $hadBlocker = [bool]$status.trigger_installed
+    $countingActive = $false
+    $startCounter = 0
+    $previousCounterValue = 0
+
+    if ($hadBlocker) {
+        $startCounter = Invoke-LogCounterAction "enable"
+        $previousCounterValue = $startCounter
+        $countingActive = $true
+    }
+
+    $samples = @()
+    $sampleCount = [math]::Max(1, [math]::Floor($DurationSeconds / $IntervalSeconds))
+    try {
+        for ($i = 0; $i -lt $sampleCount; $i++) {
+            $previousRef = [ref]$previousCounterValue
+            $sample = New-CliMonitorSample $startCounter $previousRef $countingActive
+            $previousCounterValue = [int]$previousRef.Value
+            $samples += $sample
+            Write-MonitorCsvRow $csvPath $sample
+            if (-not $Json) {
+                Write-Output ("sample={0}/{1} write_mbps={2} blocked_since_last={3}" -f ($i + 1), $sampleCount, $sample.TotalWriteMBps, $sample.BlockedLogInsertsSinceLastSample)
+            }
+            if ($i -lt ($sampleCount - 1)) {
+                Start-Sleep -Seconds $IntervalSeconds
+            }
+        }
+    } finally {
+        if ($hadBlocker) {
+            try {
+                Invoke-LogCounterAction "restore" | Out-Null
+            } catch {
+            }
+        }
+    }
+
+    $avgWrite = if ($samples.Count -gt 0) { [math]::Round((($samples | Measure-Object TotalWriteMBps -Average).Average), 3) } else { 0 }
+    $maxWrite = if ($samples.Count -gt 0) { [math]::Round((($samples | Measure-Object TotalWriteMBps -Maximum).Maximum), 3) } else { 0 }
+    $blockedTotal = if ($samples.Count -gt 0) { [int](($samples | Measure-Object BlockedLogInsertsSinceLastSample -Sum).Sum) } else { 0 }
+    $topSample = $samples | Sort-Object TopWriteMBps -Descending | Select-Object -First 1
+
+    return [pscustomobject]@{
+        result = Get-CliMonitorEvaluation $samples $hadBlocker
+        duration_seconds = $DurationSeconds
+        interval_seconds = $IntervalSeconds
+        sample_count = $samples.Count
+        csv_file = $csvPath
+        blocker_at_start = $hadBlocker
+        counting_active = $countingActive
+        avg_write_mbps = $avgWrite
+        max_write_mbps = $maxWrite
+        blocked_total = $blockedTotal
+        top_process = if ($topSample) { $topSample.TopProcess } else { "" }
+        top_pid = if ($topSample) { $topSample.TopPID } else { "" }
+        top_write_mbps = if ($topSample) { $topSample.TopWriteMBps } else { 0 }
+        samples = $samples
+    }
+}
+
 try {
     switch ($Command) {
         "status" {
@@ -101,6 +268,9 @@ try {
         }
         "sample" {
             Write-Result (ConvertTo-LogGuardSummary)
+        }
+        "monitor" {
+            Write-Result (Start-FixedMonitor)
         }
         "install" {
             Invoke-LogBlockerAction "install"

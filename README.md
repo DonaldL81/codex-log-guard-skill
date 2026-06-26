@@ -55,6 +55,7 @@ codex写盘异常检测.vbs
 
 ```text
 帮我检查 Codex 写盘
+监测 2 分钟并生成报告
 打开监控面板
 安装拦截器
 卸载拦截器
@@ -74,6 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 
 ```powershell
 .\tools\CodexLogGuardCli.ps1 status
+.\tools\CodexLogGuardCli.ps1 monitor -DurationSeconds 120
 .\tools\CodexLogGuardCli.ps1 open-gui
 .\tools\CodexLogGuardCli.ps1 install
 .\tools\CodexLogGuardCli.ps1 uninstall
@@ -83,6 +85,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\CodexLogGuardCli.ps1
 ```
 
 `deferred-clean` 适合 Codex 正在运行时使用。它会打开一个独立 PowerShell 窗口，提示你完全退出 Codex；检测到 Codex 退出后自动清理日志文件，然后等待你重新打开 Codex，等新的 `logs_2.sqlite` 和 `logs` 表生成后自动安装拦截器。
+
+`monitor` 是固定时长监测命令，默认建议 120 秒，每 5 秒采样一次。命令结束后会输出平均写盘、峰值写盘、本轮拦截次数和 CSV 记录文件路径；如果开始时拦截器已安装，监测期间会临时启用计数，结束后恢复纯拦截器。
 
 ## 重要说明
 
